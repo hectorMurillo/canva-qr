@@ -1,10 +1,12 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite'
+// (Tus otros imports, por ejemplo de React o Vue)
 
-export default defineConfig(() => {
-  return {
+export default defineConfig({
+  base: '/canva-qr/',  // <-- Añade esta línea con el nombre exacto de tu repo
+  // plugins: [ ... ],
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
@@ -18,5 +20,6 @@ export default defineConfig(() => {
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
-  };
-});
+})
+
+
