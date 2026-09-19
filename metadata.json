@@ -1,0 +1,6 @@
+{
+  "name": "Compartir QR WhatsApp",
+  "description": "Herramienta para posicionar y estampar códigos QR en documentos PDF e imágenes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
