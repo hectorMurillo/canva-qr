@@ -5,9 +5,9 @@ import { defineConfig } from 'vite'
 // (Tus otros imports, por ejemplo de React o Vue)
 
 export default defineConfig({
-  base: '/canva-qr/',  // <-- Añade esta línea con el nombre exacto de tu repo
-  // plugins: [ ... ],
-    plugins: [react(), tailwindcss()],
+  // Use repository path on GitHub Pages action, and relative path locally for AI Studio preview
+  base: process.env.GITHUB_ACTIONS ? '/canva-qr/' : './',
+  plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
