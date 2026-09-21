@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
-import { PDFDocument, rgb } from 'pdf-lib';
+import { PDFDocument, rgb, PDFName, PDFString, PDFArray } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist';
 import { 
   Upload, 
@@ -28,7 +28,11 @@ import {
   Copy,
   Info,
   Layers,
-  ShieldCheck
+  ShieldCheck,
+  Link as LinkIcon,
+  ExternalLink,
+  MousePointerClick,
+  Smartphone
 } from 'lucide-react';
 
 // Configure the worker for pdf.js using a CDN to ensure compatibility
@@ -45,7 +49,7 @@ type ErrorCorrectionLevel = 'L' | 'M' | 'Q' | 'H';
 
 export default function PdfStamper() {
   const [fileType, setFileType] = useState<'pdf' | 'image' | null>(null);
-  const [pdfBuffer, setPdfBuffer] = useState<ArrayBuffer | null>(null);
+  const [pdfBuffer, setPdfBuffer] = useState<Uint8Array | null>(null);
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
   
   const [qrs, setQrs] = useState<QROverlay[]>([]);
@@ -60,6 +64,9 @@ export default function PdfStamper() {
   const [ecLevel, setEcLevel] = useState<ErrorCorrectionLevel>('L');
   const [showPlayIcon, setShowPlayIcon] = useState(false); // Default false for maximum scannability on WhatsApp
   const [highResWhatsApp, setHighResWhatsApp] = useState(true); // 2x Super-Resolution export
+  const [embedPdfLinks, setEmbedPdfLinks] = useState(true); // Incrustar enlace interactivo oculto sobre cada QR en PDFs
+  const [iosTouchBoost, setIosTouchBoost] = useState(true); // Optimización táctil 1-Tap para iPhone (Apple HIG 44pt + QuadPoints)
+  const [touchPaddingLevel, setTouchPaddingLevel] = useState<'generous' | 'exact'>('generous');
   
   const [isGenerating, setIsGenerating] = useState(false);
   const [fileName, setFileName] = useState('');
@@ -367,10 +374,7 @@ export default function PdfStamper() {
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  const processFile = async (file: File) => {
     setFileName(file.name);
     setSelectedQrId(null);
     
@@ -390,14 +394,20 @@ export default function PdfStamper() {
         ctx.drawImage(img, 0, 0);
       };
       img.src = fileUrl;
-    } else if (file.type === 'application/pdf') {
+    } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       setFileType('pdf');
       setOriginalImage(null);
-      const buffer = await file.arrayBuffer();
-      setPdfBuffer(buffer);
 
       try {
-        const loadingTask = pdfjsLib.getDocument({ data: buffer });
+        const rawArrayBuffer = await file.arrayBuffer();
+        // IMPORTANT: Web Workers in pdfjsLib transfer ArrayBuffers via transferable objects,
+        // which completely DETACHES the ArrayBuffer in the main thread.
+        // Therefore, we keep a fresh Uint8Array copy in state and pass a separate slice to pdfjsLib!
+        const savedBytes = new Uint8Array(rawArrayBuffer.slice(0));
+        setPdfBuffer(savedBytes);
+
+        const previewBytes = new Uint8Array(rawArrayBuffer.slice(0));
+        const loadingTask = pdfjsLib.getDocument({ data: previewBytes });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(1);
 
@@ -424,6 +434,11 @@ export default function PdfStamper() {
     }
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) processFile(file);
+  };
+
   /**
    * Final Document Generation:
    * Optimized for WhatsApp with Ultra-High Resolution (2x canvas scale)
@@ -440,7 +455,8 @@ export default function PdfStamper() {
       const totalBoxHeight = qrSize + (padding * 2);
 
       if (fileType === 'pdf' && pdfBuffer) {
-        const pdfDoc = await PDFDocument.load(pdfBuffer);
+        // Pass a copy using .slice(0) to ensure the stored buffer in state is never detached across multiple downloads
+        const pdfDoc = await PDFDocument.load(pdfBuffer.slice(0));
         const pages = pdfDoc.getPages();
         const page = pages[0];
         
@@ -484,6 +500,76 @@ export default function PdfStamper() {
               opacity: 1,
             });
           }
+
+          // Incrustar enlace interactivo oculto (hipervínculo clickeable) directamente sobre el QR
+          if (embedPdfLinks && qr.url && qr.url.trim()) {
+            const rawUrl = qr.url.trim();
+            const destinationUrl = rawUrl.match(/^[a-zA-Z]+:\/\//) 
+              ? rawUrl 
+              : `https://${rawUrl}`;
+
+            // Coordenadas base del QR y su margen blanco en espacio PDF
+            let touchX1 = finalX;
+            let touchY1 = finalY;
+            let touchX2 = finalX + finalWidth;
+            let touchY2 = finalY + finalHeight;
+
+            // OPTIMIZACIÓN TÁCTIL IPHONE (Apple HIG 44pt + 1-Tap)
+            // En iOS (Safari, Archivos y visor PDF de WhatsApp), los toques con el dedo tienen un diámetro promedio de 40-44 pt.
+            // Si el área del enlace es inferior a 44 pt o carece de margen, iOS interpreta el toque como un gesto
+            // de "doble tap para zoom" o selección de texto, exigiendo dos toques y acertar en un punto milimétrico.
+            if (iosTouchBoost) {
+              const minTargetSize = touchPaddingLevel === 'generous' ? 48 : 44; // Apple HIG 44pt+
+              const extraW = Math.max(touchPaddingLevel === 'generous' ? 8 : 4, (minTargetSize - finalWidth) / 2);
+              const extraH = Math.max(touchPaddingLevel === 'generous' ? 8 : 4, (minTargetSize - finalHeight) / 2);
+
+              touchX1 = Math.max(0, finalX - extraW);
+              touchY1 = Math.max(0, finalY - extraH);
+              touchX2 = Math.min(pdfW, finalX + finalWidth + extraW);
+              touchY2 = Math.min(pdfH, finalY + finalHeight + extraH);
+            }
+
+            const round = (num: number) => Math.round(num * 100) / 100;
+            const rX1 = round(touchX1);
+            const rY1 = round(touchY1);
+            const rX2 = round(touchX2);
+            const rY2 = round(touchY2);
+
+            const linkAnnotation = pdfDoc.context.obj({
+              Type: 'Annot',
+              Subtype: 'Link',
+              Rect: [rX1, rY1, rX2, rY2],
+              Border: [0, 0, 0],
+              BS: {
+                Type: 'Border',
+                W: 0,
+                S: 'S',
+              },
+              F: 4, // Print flag
+              H: 'I', // Highlight mode: Invert (feedback táctil inmediato en iOS y Acrobat)
+              // QuadPoints define la superficie 2D completa que Apple PDFKit evalúa para hit-testing
+              // Orden Z estándar PDF 1.7: Upper-Left, Upper-Right, Lower-Left, Lower-Right
+              QuadPoints: [
+                rX1, rY2, // Superior izquierdo
+                rX2, rY2, // Superior derecho
+                rX1, rY1, // Inferior izquierdo
+                rX2, rY1, // Inferior derecho
+              ],
+              A: {
+                Type: 'Action',
+                S: 'URI',
+                URI: PDFString.of(destinationUrl),
+              },
+            });
+            const linkAnnotationRef = pdfDoc.context.register(linkAnnotation);
+
+            let annots = page.node.lookup(PDFName.of('Annots'), PDFArray);
+            if (!annots) {
+              annots = pdfDoc.context.obj([]) as unknown as PDFArray;
+              page.node.set(PDFName.of('Annots'), annots);
+            }
+            annots.push(linkAnnotationRef);
+          }
         }
 
         const pdfBytes = await pdfDoc.save();
@@ -498,7 +584,11 @@ export default function PdfStamper() {
         setIsGenerating(false);
         setTimeout(() => {
           URL.revokeObjectURL(objectUrl);
-          if (window.confirm("¡Documento PDF descargado exitosamente con máxima nitidez!\n\n¿Deseas reiniciar para procesar otro documento?")) {
+          if (window.confirm(
+            embedPdfLinks
+              ? "¡Documento PDF descargado exitosamente con máxima nitidez y enlaces interactivos ocultos incrustados!\n\nAl tocar o hacer clic sobre cualquier QR en el PDF se abrirá su enlace web directamente.\n\n¿Deseas reiniciar para procesar otro documento?"
+              : "¡Documento PDF descargado exitosamente con máxima nitidez!\n\n¿Deseas reiniciar para procesar otro documento?"
+          )) {
             resetWorkspace();
           }
         }, 1000);
@@ -1078,6 +1168,104 @@ export default function PdfStamper() {
               </div>
             </div>
 
+            {/* ENLACES INTERACTIVOS / CLICKEABLES EN PDF (OCULTOS EN LA IMAGEN) */}
+            <div className="p-4 bg-sky-50/60 border border-sky-200/90 rounded-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-bold text-sky-950 uppercase tracking-wider flex items-center gap-1.5">
+                  <LinkIcon className="w-4 h-4 text-sky-600" />
+                  Enlace Oculto en PDF (Clickeable)
+                </h3>
+                <span className="text-[10px] bg-sky-600 text-white font-semibold px-2 py-0.5 rounded-full shadow-2xs">
+                  Recomendado
+                </span>
+              </div>
+
+              <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-lg border border-sky-200/80">
+                <input
+                  type="checkbox"
+                  id="embed-pdf-links-toggle"
+                  checked={embedPdfLinks}
+                  onChange={(e) => setEmbedPdfLinks(e.target.checked)}
+                  className="w-4 h-4 mt-0.5 text-sky-600 rounded border-neutral-300 focus:ring-sky-600 cursor-pointer shrink-0"
+                />
+                <label htmlFor="embed-pdf-links-toggle" className="text-xs text-neutral-800 cursor-pointer">
+                  <span className="font-semibold block text-sky-950">Incrustar Hipervínculo Invisible sobre el QR</span>
+                  <span className="text-neutral-500 text-[11px] leading-relaxed block mt-0.5">
+                    Coloca el enlace web directamente sobre la imagen del QR en el archivo PDF de manera invisible. Si no pueden escanear el QR directamente con la cámara, simplemente tocan o hacen clic sobre el código y se abrirá el enlace.
+                  </span>
+                </label>
+              </div>
+
+              {embedPdfLinks && (
+                <div className="space-y-2.5 pt-2 border-t border-sky-200/60">
+                  <div className="flex items-start gap-2.5 bg-white p-2.5 rounded-lg border border-sky-200/80">
+                    <input
+                      type="checkbox"
+                      id="ios-touch-boost-toggle"
+                      checked={iosTouchBoost}
+                      onChange={(e) => setIosTouchBoost(e.target.checked)}
+                      className="w-4 h-4 mt-0.5 text-sky-600 rounded border-neutral-300 focus:ring-sky-600 cursor-pointer shrink-0"
+                    />
+                    <label htmlFor="ios-touch-boost-toggle" className="text-xs text-neutral-800 cursor-pointer">
+                      <span className="font-semibold block text-sky-950 flex items-center gap-1.5">
+                        <Smartphone className="w-3.5 h-3.5 text-sky-600" />
+                        Optimización Táctil iPhone / WhatsApp (1 Solo Toque)
+                      </span>
+                      <span className="text-neutral-500 text-[11px] leading-relaxed block mt-0.5">
+                        En iPhone (Safari, Archivos y visor de WhatsApp), Apple suele exigir un área de contacto mínima de 44 pt y geometría QuadPoints. Al activarlo, todo el código QR responde inmediatamente al <strong>primer toque</strong> en cualquier parte de la superficie, sin pedir doble toque de zoom ni requerir pulsar un punto específico.
+                      </span>
+                    </label>
+                  </div>
+
+                  {iosTouchBoost && (
+                    <div className="bg-white/80 p-2.5 rounded-lg border border-sky-200/70 space-y-1.5">
+                      <label className="block text-[11px] font-semibold text-sky-950">
+                        Área de Detección Táctil:
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTouchPaddingLevel('generous')}
+                          className={`px-2.5 py-1.5 text-left rounded-lg text-xs border transition-colors ${
+                            touchPaddingLevel === 'generous'
+                              ? 'bg-sky-600 text-white border-sky-600 font-semibold'
+                              : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px]">Todo el QR + Margen</div>
+                          <div className={`text-[10px] ${touchPaddingLevel === 'generous' ? 'text-sky-100' : 'text-neutral-500'}`}>
+                            Estándar Apple 48pt (1 toque infalible)
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setTouchPaddingLevel('exact')}
+                          className={`px-2.5 py-1.5 text-left rounded-lg text-xs border transition-colors ${
+                            touchPaddingLevel === 'exact'
+                              ? 'bg-sky-600 text-white border-sky-600 font-semibold'
+                              : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
+                          }`}
+                        >
+                          <div className="font-bold text-[11px]">Solo Silueta QR</div>
+                          <div className={`text-[10px] ${touchPaddingLevel === 'exact' ? 'text-sky-100' : 'text-neutral-500'}`}>
+                            Justo en el recuadro blanco
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="text-[11px] text-sky-900 bg-sky-100/50 p-2.5 rounded-lg flex items-start gap-2 leading-relaxed">
+                <MousePointerClick className="w-4 h-4 text-sky-600 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Área táctil completa:</strong> Con QuadPoints y el estándar ergonómico de Apple, el hipervínculo cubre toda la superficie del código QR (incluyendo el margen blanco protector), facilitando tocarlo con el dedo en cualquier punto en WhatsApp, Safari, Acrobat Reader y visores de iOS.
+                </span>
+              </div>
+            </div>
+
             {/* Colors */}
             <div className="grid grid-cols-2 gap-4 pt-1 border-t border-neutral-100">
               <div>
@@ -1115,7 +1303,19 @@ export default function PdfStamper() {
             <FileText className="w-5 h-5 text-emerald-600" />
             Cargar Documento
           </h2>
-          <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-neutral-300 border-dashed rounded-xl cursor-pointer bg-neutral-50 hover:bg-neutral-100 transition-colors">
+          <label 
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const file = e.dataTransfer.files?.[0];
+              if (file) processFile(file);
+            }}
+            className="flex flex-col items-center justify-center w-full h-28 border-2 border-neutral-300 border-dashed rounded-xl cursor-pointer bg-neutral-50 hover:bg-neutral-100 transition-colors"
+          >
             <div className="flex flex-col items-center justify-center pt-4 pb-5 text-center px-4">
               <Upload className="w-7 h-7 mb-2 text-neutral-400" />
               <p className="mb-1 text-xs text-neutral-600">
@@ -1149,13 +1349,25 @@ export default function PdfStamper() {
         <div className="bg-neutral-200/50 border border-neutral-200 rounded-2xl p-4 flex-1 flex flex-col items-center overflow-auto min-h-[520px]">
           
           {!fileType ? (
-            <div className="flex-1 flex flex-col items-center justify-center text-center max-w-sm">
+            <div 
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const file = e.dataTransfer.files?.[0];
+                if (file) processFile(file);
+              }}
+              className="flex-1 flex flex-col items-center justify-center text-center max-w-sm w-full cursor-pointer py-12"
+            >
               <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
                 <FileText className="w-8 h-8 text-neutral-300" />
               </div>
               <h3 className="text-neutral-700 font-medium mb-2">No hay archivo cargado</h3>
               <p className="text-neutral-500 text-sm">
-                Sube tu imagen (como la rutina de gimnasio) o un PDF. Luego, añade los códigos QR para colocarlos y alinearlos en su columna.
+                Sube tu imagen (como la rutina de gimnasio) o un PDF. Arrástralo aquí o usa el panel izquierdo.
               </p>
             </div>
           ) : (
@@ -1266,8 +1478,16 @@ export default function PdfStamper() {
 
                       {/* Coordinates tooltip on selected */}
                       {isSelected && (
-                        <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 bg-neutral-900/90 text-white text-[9px] font-mono px-1.5 py-0.5 rounded shadow whitespace-nowrap pointer-events-none z-10">
-                          X: {qr.x.toFixed(1)}% | Y: {qr.y.toFixed(1)}%
+                        <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 bg-neutral-900/90 text-white text-[9px] font-mono px-2 py-0.5 rounded shadow whitespace-nowrap pointer-events-none z-10 flex items-center gap-1.5">
+                          <span>X: {qr.x.toFixed(1)}% | Y: {qr.y.toFixed(1)}%</span>
+                          {embedPdfLinks && fileType === 'pdf' && (
+                            <>
+                              <span className="text-neutral-500">·</span>
+                              <span className="text-sky-300 flex items-center gap-0.5 font-sans font-medium">
+                                <LinkIcon className="w-2.5 h-2.5" /> {iosTouchBoost ? 'iPhone 1-Tap activo' : 'Enlace oculto'}
+                              </span>
+                            </>
+                          )}
                         </div>
                       )}
                       
@@ -1316,10 +1536,20 @@ export default function PdfStamper() {
           <div className="text-xs text-neutral-600 flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
             <span>
-              {highResWhatsApp ? (
-                <>Modo exportación: <strong>Súper-Resolución 2x Ultra HD</strong> (Listo para escanear en WhatsApp)</>
+              {fileType === 'pdf' ? (
+                <>
+                  Modo PDF: {embedPdfLinks ? (
+                    <span className="text-sky-800 font-semibold">
+                      Enlaces interactivos ocultos activos ({iosTouchBoost ? 'iPhone 1-Tap 44pt+ en todo el QR' : 'QR clickeable al tacto'})
+                    </span>
+                  ) : (
+                    <span>Estampado visual estándar</span>
+                  )}
+                </>
+              ) : highResWhatsApp ? (
+                <>Modo Imagen: <strong>Súper-Resolución 2x Ultra HD</strong> (Listo para escanear en WhatsApp)</>
               ) : (
-                <>Modo exportación: Resolución Original (1x)</>
+                <>Modo Imagen: Resolución Original (1x)</>
               )}
             </span>
           </div>
