@@ -32,11 +32,20 @@ import {
   Link as LinkIcon,
   ExternalLink,
   MousePointerClick,
-  Smartphone
+  Smartphone,
+  Share2,
+  FileCheck,
+  X,
+  Loader2
 } from 'lucide-react';
 
-// Configure the worker for pdf.js using a CDN to ensure compatibility
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+
+// Configure the worker for pdf.js using same-origin bundled worker
+// This resolves the iOS Chrome security block where cross-origin workers are prevented
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+}
 
 type QROverlay = {
   id: string;
@@ -69,6 +78,13 @@ export default function PdfStamper() {
   const [touchPaddingLevel, setTouchPaddingLevel] = useState<'generous' | 'exact'>('generous');
   
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isLoadingFile, setIsLoadingFile] = useState(false);
+  const [downloadSuccessInfo, setDownloadSuccessInfo] = useState<{
+    url: string;
+    fileName: string;
+    isPdf: boolean;
+    blob: Blob;
+  } | null>(null);
   const [fileName, setFileName] = useState('');
   const [nudgeStep, setNudgeStep] = useState<number>(0.5);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -360,6 +376,14 @@ export default function PdfStamper() {
     }
   };
 
+  const waitForCanvas = async (maxAttempts = 50): Promise<HTMLCanvasElement | null> => {
+    for (let i = 0; i < maxAttempts; i++) {
+      if (canvasRef.current) return canvasRef.current;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return null;
+  };
+
   const resetWorkspace = () => {
     setFileType(null);
     setPdfBuffer(null);
@@ -368,6 +392,12 @@ export default function PdfStamper() {
     setSelectedQrId(null);
     setCurrentUrl('');
     setFileName('');
+    if (downloadSuccessInfo) {
+      try {
+        URL.revokeObjectURL(downloadSuccessInfo.url);
+      } catch {}
+      setDownloadSuccessInfo(null);
+    }
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       if (ctx) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
@@ -377,21 +407,36 @@ export default function PdfStamper() {
   const processFile = async (file: File) => {
     setFileName(file.name);
     setSelectedQrId(null);
+    setIsLoadingFile(true);
     
     if (file.type.startsWith('image/')) {
       setFileType('image');
       setPdfBuffer(null);
       const fileUrl = URL.createObjectURL(file);
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         setOriginalImage(img);
-        const canvas = canvasRef.current;
-        if (!canvas) return;
+        const canvas = await waitForCanvas();
+        if (!canvas) {
+          setIsLoadingFile(false);
+          showToast('Error al inicializar el lienzo para la imagen.');
+          return;
+        }
         const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        if (!ctx) {
+          setIsLoadingFile(false);
+          showToast('Error al obtener contexto del lienzo.');
+          return;
+        }
         canvas.width = img.width;
         canvas.height = img.height;
         ctx.drawImage(img, 0, 0);
+        setIsLoadingFile(false);
+        showToast('Imagen cargada con éxito.');
+      };
+      img.onerror = () => {
+        setIsLoadingFile(false);
+        showToast('No se pudo cargar la imagen.');
       };
       img.src = fileUrl;
     } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
@@ -406,17 +451,34 @@ export default function PdfStamper() {
         const savedBytes = new Uint8Array(rawArrayBuffer.slice(0));
         setPdfBuffer(savedBytes);
 
+        // Wait for React to mount the canvas element into the DOM
+        const canvas = await waitForCanvas();
+        if (!canvas) {
+          throw new Error("No se pudo inicializar el área de dibujo del documento.");
+        }
+
         const previewBytes = new Uint8Array(rawArrayBuffer.slice(0));
-        const loadingTask = pdfjsLib.getDocument({ data: previewBytes });
+        const loadingTask = pdfjsLib.getDocument({ 
+          data: previewBytes,
+          cMapUrl: 'https://unpkg.com/pdfjs-dist@6.3.289/cmaps/',
+          cMapPacked: true,
+          standardFontDataUrl: 'https://unpkg.com/pdfjs-dist@6.3.289/standard_fonts/',
+        });
         const pdf = await loadingTask.promise;
         const page = await pdf.getPage(1);
 
-        const viewport = page.getViewport({ scale: 2.0 });
-        const canvas = canvasRef.current;
-        if (!canvas) return;
+        // Calculate safe viewport scale for mobile (avoiding iOS WebKit canvas limits)
+        const unscaledViewport = page.getViewport({ scale: 1.0 });
+        const maxDimension = Math.max(unscaledViewport.width, unscaledViewport.height);
+        // Cap max canvas dimension at 2200px for optimal memory on iPhone while remaining razor sharp
+        const safeScale = maxDimension > 0 ? Math.min(2.0, 2200 / maxDimension) : 1.5;
+
+        const viewport = page.getViewport({ scale: Math.max(1.0, safeScale) });
 
         const context = canvas.getContext('2d');
-        if (!context) return;
+        if (!context) {
+          throw new Error("No se pudo obtener el contexto 2D del lienzo.");
+        }
 
         canvas.height = viewport.height;
         canvas.width = viewport.width;
@@ -425,18 +487,117 @@ export default function PdfStamper() {
           canvasContext: context,
           viewport: viewport
         }).promise;
-      } catch (err) {
+
+        setIsLoadingFile(false);
+        showToast('PDF cargado y listo para posicionar códigos.');
+      } catch (err: any) {
         console.error("Error rendering PDF preview:", err);
-        alert("Error al cargar la vista previa del PDF.");
+        setIsLoadingFile(false);
+        showToast(`Error al cargar el PDF: ${err.message || 'Intente nuevamente'}`);
       }
     } else {
-      alert("Formato de archivo no soportado. Sube un PDF o una Imagen.");
+      setIsLoadingFile(false);
+      showToast("Formato no soportado. Sube un PDF o una Imagen.");
     }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) processFile(file);
+  };
+
+  const deliverGeneratedFile = async (blob: Blob, downloadFileName: string, isPdf: boolean) => {
+    const objectUrl = URL.createObjectURL(blob);
+    
+    // Save to state for persistent UI dialog & manual options
+    setDownloadSuccessInfo({
+      url: objectUrl,
+      fileName: downloadFileName,
+      isPdf,
+      blob,
+    });
+
+    const isIos = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+    let sharedViaNativeSheet = false;
+
+    // On iOS (iPhone/iPad), Web Share API is the primary, Apple-native method to download to Files or WhatsApp
+    if (isIos && typeof navigator !== 'undefined' && navigator.canShare) {
+      try {
+        const fileToShare = new File([blob], downloadFileName, { 
+          type: isPdf ? 'application/pdf' : 'image/png' 
+        });
+        if (navigator.canShare({ files: [fileToShare] })) {
+          await navigator.share({
+            files: [fileToShare],
+            title: downloadFileName,
+          });
+          sharedViaNativeSheet = true;
+          showToast('¡Archivo guardado o compartido con éxito!');
+        }
+      } catch (e: any) {
+        if (e.name !== 'AbortError') {
+          console.warn('Share API error, fallback to anchor:', e);
+        }
+      }
+    }
+
+    // Standard DOM-attached anchor download (works across desktop and mobile browsers)
+    if (!sharedViaNativeSheet) {
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = downloadFileName;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      document.body.appendChild(link);
+      link.click();
+      
+      setTimeout(() => {
+        try {
+          if (document.body.contains(link)) {
+            document.body.removeChild(link);
+          }
+        } catch {}
+      }, 500);
+
+      showToast(isIos ? '¡Archivo listo! Revisa tu carpeta de Descargas o usa el botón Compartir.' : '¡Descarga completada con éxito!');
+    }
+  };
+
+  const handleNativeShareAgain = async () => {
+    if (!downloadSuccessInfo) return;
+    const { blob, fileName: dlName, isPdf } = downloadSuccessInfo;
+    if (typeof navigator !== 'undefined' && navigator.canShare) {
+      try {
+        const fileToShare = new File([blob], dlName, { 
+          type: isPdf ? 'application/pdf' : 'image/png' 
+        });
+        if (navigator.canShare({ files: [fileToShare] })) {
+          await navigator.share({
+            files: [fileToShare],
+            title: dlName,
+          });
+          showToast('¡Compartido con éxito!');
+          return;
+        }
+      } catch (e: any) {
+        if (e.name !== 'AbortError') {
+          console.warn('Share error:', e);
+        }
+      }
+    }
+    // Fallback: trigger direct anchor click
+    const link = document.createElement('a');
+    link.href = downloadSuccessInfo.url;
+    link.download = dlName;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      try {
+        if (document.body.contains(link)) document.body.removeChild(link);
+      } catch {}
+    }, 500);
   };
 
   /**
@@ -574,24 +735,8 @@ export default function PdfStamper() {
 
         const pdfBytes = await pdfDoc.save();
         const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-        const objectUrl = URL.createObjectURL(blob);
-        
-        const link = document.createElement('a');
-        link.href = objectUrl;
-        link.download = `QR_${fileName}`;
-        link.click();
-        
+        await deliverGeneratedFile(blob, `QR_${fileName}`, true);
         setIsGenerating(false);
-        setTimeout(() => {
-          URL.revokeObjectURL(objectUrl);
-          if (window.confirm(
-            embedPdfLinks
-              ? "¡Documento PDF descargado exitosamente con máxima nitidez y enlaces interactivos ocultos incrustados!\n\nAl tocar o hacer clic sobre cualquier QR en el PDF se abrirá su enlace web directamente.\n\n¿Deseas reiniciar para procesar otro documento?"
-              : "¡Documento PDF descargado exitosamente con máxima nitidez!\n\n¿Deseas reiniciar para procesar otro documento?"
-          )) {
-            resetWorkspace();
-          }
-        }, 1000);
 
       } else if (fileType === 'image' && originalImage) {
         // Ultra-High Resolution factor for WhatsApp scannability (2x scale)
@@ -601,7 +746,10 @@ export default function PdfStamper() {
         canvas.width = Math.round(originalImage.width * exportScale);
         canvas.height = Math.round(originalImage.height * exportScale);
         const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        if (!ctx) {
+          setIsGenerating(false);
+          return;
+        }
         
         // Render base image at high quality
         ctx.imageSmoothingEnabled = true;
@@ -645,30 +793,21 @@ export default function PdfStamper() {
         }
         
         // Export as Lossless PNG at 100% quality
-        canvas.toBlob((blob) => {
-          if (!blob) return;
-          const objectUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = objectUrl;
+        canvas.toBlob(async (blob) => {
+          if (!blob) {
+            setIsGenerating(false);
+            return;
+          }
           const baseName = fileName.substring(0, fileName.lastIndexOf('.')) || fileName;
-          link.download = `QR_${baseName}_UltraHD.png`;
-          link.click();
-          
+          await deliverGeneratedFile(blob, `QR_${baseName}_UltraHD.png`, false);
           setIsGenerating(false);
-
-          setTimeout(() => {
-            URL.revokeObjectURL(objectUrl);
-            if (window.confirm("¡Imagen estampada con Súper-Resolución para WhatsApp descargada exitosamente!\n\nTip: Para que WhatsApp no comprima la imagen, envíala como 'Documento' (📎) en lugar de foto normal.\n\n¿Deseas reiniciar para procesar otra imagen?")) {
-              resetWorkspace();
-            }
-          }, 1000);
         }, 'image/png', 1.0);
         
         return; 
       }
     } catch (err) {
       console.error("Error generating final document:", err);
-      alert("Hubo un error al generar el archivo final.");
+      showToast("Hubo un error al generar el archivo final.");
       setIsGenerating(false);
     }
   };
@@ -1348,7 +1487,7 @@ export default function PdfStamper() {
       <div className="lg:col-span-8 flex flex-col">
         <div className="bg-neutral-200/50 border border-neutral-200 rounded-2xl p-4 flex-1 flex flex-col items-center overflow-auto min-h-[520px]">
           
-          {!fileType ? (
+          {!fileType && !isLoadingFile ? (
             <div 
               onDragOver={(e) => {
                 e.preventDefault();
@@ -1377,11 +1516,13 @@ export default function PdfStamper() {
                 <div className="flex items-center gap-2">
                   <Move className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>
-                    {qrs.length === 0 
-                      ? 'Añade tu primer código QR desde el panel izquierdo.'
-                      : selectedQrId 
-                        ? `Arrastra el QR #${selectedIndex + 1} o muévelo con las flechas del teclado.`
-                        : `${qrs.length} QR${qrs.length !== 1 ? 's' : ''} cargados. Haz clic en cualquiera para moverlo o alinearlo.`}
+                    {isLoadingFile 
+                      ? 'Procesando documento...'
+                      : qrs.length === 0 
+                        ? 'Añade tu primer código QR desde el panel izquierdo.'
+                        : selectedQrId 
+                          ? `Arrastra el QR #${selectedIndex + 1} o muévelo con las flechas del teclado.`
+                          : `${qrs.length} QR${qrs.length !== 1 ? 's' : ''} cargados. Haz clic en cualquiera para moverlo o alinearlo.`}
                   </span>
                 </div>
 
@@ -1421,9 +1562,22 @@ export default function PdfStamper() {
               {/* Canvas Document Container */}
               <div 
                 ref={containerRef} 
-                className="relative inline-block shadow-xl max-w-full bg-white select-none rounded-lg overflow-hidden"
+                className="relative inline-block shadow-xl max-w-full bg-white select-none rounded-lg overflow-hidden min-h-[300px]"
                 onClick={() => setSelectedQrId(null)}
               >
+                {/* Floating Loading Overlay */}
+                {isLoadingFile && (
+                  <div className="absolute inset-0 bg-white/85 backdrop-blur-xs flex flex-col items-center justify-center p-6 z-30 min-h-[320px]">
+                    <div className="w-16 h-16 bg-emerald-50 rounded-2xl flex items-center justify-center mb-4 border border-emerald-100 shadow-sm">
+                      <Loader2 className="w-8 h-8 text-emerald-600 animate-spin" />
+                    </div>
+                    <h3 className="text-neutral-800 font-semibold mb-1 text-sm">Cargando y procesando documento...</h3>
+                    <p className="text-neutral-500 text-xs text-center max-w-xs">
+                      Optimizando resolución y renderizado para tu pantalla e iPhone.
+                    </p>
+                  </div>
+                )}
+
                 <canvas 
                   ref={canvasRef} 
                   className="block w-full h-auto pointer-events-none"
@@ -1573,6 +1727,82 @@ export default function PdfStamper() {
           </button>
         </div>
       </div>
+
+      {/* Persistent Floating Completion & Sharing Card for iOS Safari / Mobile */}
+      {downloadSuccessInfo && (
+        <div className="fixed inset-x-4 bottom-6 sm:inset-x-auto sm:right-6 sm:w-96 z-50 bg-white border border-emerald-200/90 rounded-2xl shadow-2xl p-4 animate-in slide-in-from-bottom-5">
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0 shadow-2xs">
+                <FileCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-neutral-900">¡Archivo Listo!</h4>
+                <p className="text-[11px] text-neutral-500 font-mono truncate max-w-[200px]" title={downloadSuccessInfo.fileName}>
+                  {downloadSuccessInfo.fileName}
+                </p>
+              </div>
+            </div>
+            <button 
+              onClick={() => setDownloadSuccessInfo(null)}
+              className="text-neutral-400 hover:text-neutral-700 p-1.5 rounded-lg hover:bg-neutral-100 transition-colors"
+              title="Cerrar aviso"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <p className="text-xs text-neutral-600 mb-3 leading-relaxed">
+            {downloadSuccessInfo.isPdf
+              ? 'PDF listo con hipervínculos táctiles (1-Tap) incrustados en toda la superficie de cada código QR.'
+              : 'Imagen estampada en Ultra HD 2x lista para enviar por WhatsApp.'}
+          </p>
+
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={handleNativeShareAgain}
+              className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors"
+              title="Abrir menú nativo de iPhone para guardar en Archivos o enviar directamente a WhatsApp"
+            >
+              <Share2 className="w-4 h-4" />
+              <span>Guardar / WhatsApp</span>
+            </button>
+
+            <a
+              href={downloadSuccessInfo.url}
+              download={downloadSuccessInfo.fileName}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-neutral-100 hover:bg-neutral-200 active:bg-neutral-300 text-neutral-800 rounded-xl text-xs font-semibold transition-colors"
+              title="Descargar archivo nuevamente al dispositivo"
+            >
+              <Download className="w-4 h-4" />
+              <span>Descargar archivo</span>
+            </a>
+          </div>
+
+          <div className="mt-2.5 pt-2.5 border-t border-neutral-100 flex items-center justify-between text-[11px]">
+            <a
+              href={downloadSuccessInfo.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-emerald-700 hover:underline flex items-center gap-1 font-medium"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Abrir en nueva pestaña</span>
+            </a>
+            <button
+              onClick={() => {
+                setDownloadSuccessInfo(null);
+                resetWorkspace();
+              }}
+              className="text-neutral-400 hover:text-red-600 hover:underline"
+            >
+              Procesar otro archivo
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
