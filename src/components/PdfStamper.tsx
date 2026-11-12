@@ -93,12 +93,30 @@ export default function PdfStamper() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const quickAddInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage(null);
     }, 2800);
+  };
+
+  const handleQuickPaste = async () => {
+    try {
+      if (navigator.clipboard?.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim()) {
+          setCurrentUrl(text.trim());
+          showToast('Enlace pegado');
+          quickAddInputRef.current?.focus();
+          return;
+        }
+      }
+    } catch {
+      // ignore clipboard permission error
+    }
+    quickAddInputRef.current?.focus();
   };
 
   // Dragging state tracking using pointer capture
@@ -121,6 +139,13 @@ export default function PdfStamper() {
   const handleAddQr = () => {
     if (!currentUrl.trim()) return;
     
+    if (!fileType) {
+      showToast('⚠️ Sube primero tu imagen o PDF para colocar el código QR.');
+      const fileInput = document.getElementById('document-file-input') as HTMLInputElement;
+      fileInput?.click();
+      return;
+    }
+
     let initX = 90.5; // Default right column (ideal for tables with 'QR' column on right)
     let initY = 32.0;
 
@@ -153,6 +178,9 @@ export default function PdfStamper() {
     setSelectedQrId(newQr.id);
     setCurrentUrl('');
     showToast(`QR #${qrs.length + 1} añadido y alineado en la columna.`);
+    setTimeout(() => {
+      quickAddInputRef.current?.focus();
+    }, 60);
   };
 
   const removeQr = (id: string) => {
@@ -924,31 +952,16 @@ export default function PdfStamper() {
           </h2>
 
           <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-neutral-700 mb-1.5">Añadir Enlace QR</label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="https://ejemplo.com o texto..."
-                  value={currentUrl}
-                  onChange={(e) => setCurrentUrl(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleAddQr();
-                  }}
-                  className="flex-1 px-3 py-2 border border-neutral-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-sm"
-                />
-                <button
-                  onClick={handleAddQr}
-                  disabled={!currentUrl.trim()}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white rounded-xl transition-colors font-medium flex items-center justify-center shadow-sm"
-                  title="Añadir este código QR (se alineará automáticamente con la columna de los anteriores)"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
+            <div className="p-3 bg-emerald-50/80 border border-emerald-200/90 rounded-xl text-xs text-emerald-950 flex items-start gap-2.5">
+              <LinkIcon className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-emerald-900">
+                  Campo "Añadir Enlace QR" trasladado
+                </p>
+                <p className="text-[11px] text-emerald-800 mt-0.5 leading-relaxed">
+                  Para tu comodidad, el campo de enlace se encuentra integrado <strong>directamente sobre la imagen a la derecha</strong>, donde posicionas y mueves cada código QR.
+                </p>
               </div>
-              <p className="text-[11px] text-neutral-500 mt-1">
-                Al añadir nuevos códigos, se colocarán <strong>alineados en la misma columna vertical</strong> automáticamente.
-              </p>
             </div>
 
             {/* List of active QRs */}
@@ -1462,7 +1475,7 @@ export default function PdfStamper() {
               </p>
               <p className="text-[11px] text-neutral-400">PDF, JPG o PNG soportados</p>
             </div>
-            <input type="file" className="hidden" accept="application/pdf,image/*" onChange={handleFileUpload} />
+            <input id="document-file-input" type="file" className="hidden" accept="application/pdf,image/*" onChange={handleFileUpload} />
           </label>
 
           {fileName && (
@@ -1487,52 +1500,151 @@ export default function PdfStamper() {
       <div className="lg:col-span-8 flex flex-col">
         <div className="bg-neutral-200/50 border border-neutral-200 rounded-2xl p-4 flex-1 flex flex-col items-center overflow-auto min-h-[520px]">
           
-          {!fileType && !isLoadingFile ? (
-            <div 
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                const file = e.dataTransfer.files?.[0];
-                if (file) processFile(file);
-              }}
-              className="flex-1 flex flex-col items-center justify-center text-center max-w-sm w-full cursor-pointer py-12"
-            >
-              <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4">
-                <FileText className="w-8 h-8 text-neutral-300" />
-              </div>
-              <h3 className="text-neutral-700 font-medium mb-2">No hay archivo cargado</h3>
-              <p className="text-neutral-500 text-sm">
-                Sube tu imagen (como la rutina de gimnasio) o un PDF. Arrástralo aquí o usa el panel izquierdo.
-              </p>
-            </div>
-          ) : (
-            <div className="relative w-full flex flex-col items-center">
-              {/* Top helper status & quick alignment bar */}
-              <div className="w-full flex items-center justify-between mb-3 text-xs text-neutral-700 bg-white/90 backdrop-blur-xs px-4 py-2.5 rounded-xl border border-neutral-200/90 shadow-2xs">
-                <div className="flex items-center gap-2">
-                  <Move className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>
-                    {isLoadingFile 
-                      ? 'Procesando documento...'
-                      : qrs.length === 0 
-                        ? 'Añade tu primer código QR desde el panel izquierdo.'
-                        : selectedQrId 
-                          ? `Arrastra el QR #${selectedIndex + 1} o muévelo con las flechas del teclado.`
-                          : `${qrs.length} QR${qrs.length !== 1 ? 's' : ''} cargados. Haz clic en cualquiera para moverlo o alinearlo.`}
-                  </span>
+          <div className="relative w-full flex flex-col items-center">
+            {/* STICKY QUICK-ADD & INTERACTION BAR DIRECTLY ABOVE CANVAS / WORKSPACE */}
+            <div className="sticky top-0 z-30 w-full mb-3 bg-white/95 backdrop-blur-md px-4 py-3 rounded-2xl border border-neutral-300/80 shadow-md transition-all">
+              {/* Main Input Row: Añadir Enlace QR */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-bold text-neutral-800 shrink-0">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <LinkIcon className="w-4 h-4 text-emerald-600" />
+                  <span>Añadir Enlace QR:</span>
                 </div>
 
-                {/* Quick alignment shortcuts directly on preview canvas */}
-                <div className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-1.5">
+                  <div className="relative flex-1">
+                    <input
+                      ref={quickAddInputRef}
+                      type="text"
+                      placeholder={fileType ? "Pega el enlace (YouTube, TikTok, Drive, web...) y presiona Enter o Añadir QR" : "Pega tu enlace aquí (y sube tu imagen abajo para estamparlo)"}
+                      value={currentUrl}
+                      onChange={(e) => setCurrentUrl(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleAddQr();
+                      }}
+                      className="w-full pl-3 pr-8 py-2 bg-neutral-50 hover:bg-white focus:bg-white border border-neutral-300 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-sm shadow-2xs transition-all font-sans"
+                    />
+                    {currentUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setCurrentUrl('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-700 p-0.5 cursor-pointer"
+                        title="Limpiar"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleQuickPaste}
+                    className="px-2.5 py-2 bg-neutral-100 hover:bg-neutral-200 active:bg-neutral-300 text-neutral-700 border border-neutral-200 rounded-xl transition-colors font-medium text-xs flex items-center gap-1 shadow-2xs shrink-0 cursor-pointer"
+                    title="Pegar enlace del portapapeles"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-neutral-600" />
+                    <span className="hidden sm:inline">Pegar</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleAddQr}
+                    disabled={!currentUrl.trim()}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-emerald-300 disabled:cursor-not-allowed text-white rounded-xl transition-all font-semibold text-xs sm:text-sm flex items-center gap-1.5 shadow-sm shrink-0 cursor-pointer"
+                    title="Añadir este código QR (se colocará alineado en la columna de tu documento)"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Añadir QR</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Sub-bar: Selected QR status, micro-nudges, and alignment shortcuts */}
+              <div className="flex flex-wrap items-center justify-between gap-2 mt-2.5 pt-2 border-t border-neutral-100 text-xs">
+                {selectedQr ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-900 border border-emerald-200 px-2.5 py-1 rounded-lg font-medium text-xs shadow-2xs">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-600"></span>
+                      <span>QR #{selectedIndex + 1}:</span>
+                      <span className="font-mono font-bold">X: {selectedQr.x.toFixed(1)}% | Y: {selectedQr.y.toFixed(1)}%</span>
+                    </div>
+
+                    {/* Directional micro-nudges right in the bar */}
+                    <div className="flex items-center gap-0.5 bg-neutral-100 p-0.5 rounded-lg border border-neutral-200 shadow-2xs">
+                      <button 
+                        type="button"
+                        onClick={() => nudgeSelectedQr(-nudgeStep, 0)} 
+                        className="p-1 hover:bg-white rounded text-neutral-700 transition-colors cursor-pointer"
+                        title="Mover QR Izquierda"
+                      >
+                        <ArrowLeft className="w-3 h-3" />
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => nudgeSelectedQr(0, -nudgeStep)} 
+                        className="p-1 hover:bg-white rounded text-neutral-700 transition-colors cursor-pointer"
+                        title="Mover QR Arriba"
+                      >
+                        <ArrowUp className="w-3 h-3" />
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => nudgeSelectedQr(0, nudgeStep)} 
+                        className="p-1 hover:bg-white rounded text-neutral-700 transition-colors cursor-pointer"
+                        title="Mover QR Abajo"
+                      >
+                        <ArrowDown className="w-3 h-3" />
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => nudgeSelectedQr(nudgeStep, 0)} 
+                        className="p-1 hover:bg-white rounded text-neutral-700 transition-colors cursor-pointer"
+                        title="Mover QR Derecha"
+                      >
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => removeQr(selectedQr.id)}
+                      className="p-1.5 text-neutral-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                      title="Eliminar este QR"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setSelectedQrId(null)}
+                      className="text-neutral-500 hover:text-neutral-800 text-[11px] font-medium underline ml-0.5 cursor-pointer"
+                    >
+                      Deseleccionar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-neutral-600 text-xs">
+                    <Move className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>
+                      {isLoadingFile 
+                        ? 'Procesando documento...'
+                        : !fileType
+                          ? 'Sube tu documento abajo para visualizarlo y arrastrar los códigos QR.'
+                          : qrs.length === 0 
+                            ? 'Pega un enlace arriba y presiona "Añadir QR" para colocarlo en tu imagen.'
+                            : `${qrs.length} QR${qrs.length !== 1 ? 's' : ''} en el documento · Arrastra cualquier QR sobre su ejercicio correspondiente.`}
+                    </span>
+                  </div>
+                )}
+
+                {/* Alignment Action Shortcuts */}
+                <div className="flex items-center gap-1.5 ml-auto">
                   {qrs.length >= 2 && (
                     <button
-                      onClick={() => alignAllVertical()}
-                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
-                      title="Alinear todos los QRs en una columna recta (misma X)"
+                      type="button"
+                      onClick={() => alignAllVertical(selectedQr?.x)}
+                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                      title="Alinear todos los QRs en la misma columna recta (misma X)"
                     >
                       <ArrowUpDown className="w-3.5 h-3.5 text-emerald-600" />
                       <span>Alinear Columna</span>
@@ -1540,26 +1652,50 @@ export default function PdfStamper() {
                   )}
                   {qrs.length >= 3 && (
                     <button
+                      type="button"
                       onClick={distributeVertical}
-                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors"
+                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                       title="Distribuir verticalmente de forma equidistante"
                     >
                       <Sliders className="w-3.5 h-3.5 text-emerald-600" />
                       <span>Distribuir</span>
                     </button>
                   )}
-                  {selectedQrId && (
-                    <button
-                      onClick={() => setSelectedQrId(null)}
-                      className="text-neutral-400 hover:text-neutral-700 underline text-xs font-medium ml-1"
-                    >
-                      Deseleccionar
-                    </button>
-                  )}
                 </div>
               </div>
+            </div>
 
-              {/* Canvas Document Container */}
+            {/* If no file, show dropzone underneath the input bar */}
+            {!fileType && !isLoadingFile ? (
+              <div 
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const file = e.dataTransfer.files?.[0];
+                  if (file) processFile(file);
+                }}
+                onClick={() => {
+                  const input = document.getElementById('document-file-input') as HTMLInputElement;
+                  input?.click();
+                }}
+                className="flex-1 flex flex-col items-center justify-center text-center max-w-md w-full cursor-pointer py-16 px-6 bg-white/70 hover:bg-white rounded-2xl border-2 border-dashed border-neutral-300 hover:border-emerald-500 transition-all shadow-sm my-6"
+              >
+                <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-2xl shadow-xs flex items-center justify-center mb-3">
+                  <Upload className="w-8 h-8" />
+                </div>
+                <h3 className="text-neutral-800 font-semibold mb-1 text-base">Sube tu imagen o documento PDF</h3>
+                <p className="text-neutral-500 text-xs max-w-xs mb-4">
+                  Arrastra tu rutina de ejercicios (JPG, PNG) o PDF aquí, o haz clic para explorar tus archivos.
+                </p>
+                <span className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-2xs">
+                  Seleccionar Imagen o PDF
+                </span>
+              </div>
+            ) : (
               <div 
                 ref={containerRef} 
                 className="relative inline-block shadow-xl max-w-full bg-white select-none rounded-lg overflow-hidden min-h-[300px]"
@@ -1680,9 +1816,8 @@ export default function PdfStamper() {
                   );
                 })}
               </div>
-            </div>
-          )}
-
+            )}
+          </div>
         </div>
 
         {/* Action Download Bar */}
